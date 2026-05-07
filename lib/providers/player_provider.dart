@@ -9,6 +9,7 @@ class PlayerProvider extends ChangeNotifier {
   VideoPlayerController? _currentController;
   VideoPlayerController? _prevController;
   VideoPlayerController? _nextController;
+  String? _preloadedUri;
 
   bool _isPlaying = false;
   bool _isInitialized = false;
@@ -26,23 +27,30 @@ class PlayerProvider extends ChangeNotifier {
   /// Set a new current video.
   Future<void> loadCurrent(String uri, {double speed = 1.0}) async {
     final oldController = _currentController;
-    _isFinished = false; // Reset finished state for new video
-    
-    // 1. Get/Create new controller
-    final newController = _getOrCreate(uri);
-    
-    // 2. If switching to a DIFFERENT controller, cleanup the old one
-    if (oldController != null && oldController != newController) {
+    _isFinished = false;
+
+    // Swap in preloaded next controller if URI matches
+    final bool usingPreloaded = (uri == _preloadedUri);
+    final newController = usingPreloaded
+        ? _nextController!
+        : _getOrCreate(uri);
+
+    _preloadedUri = null;
+
+    // Promote preloaded → current, demote current → prev
+    if (usingPreloaded) {
+      _prevController = oldController;
+      _nextController = null;
+    } else if (oldController != null && oldController != newController) {
       oldController.removeListener(_onListener);
-      await oldController.pause();
+      oldController.pause();
     }
 
     _currentController = newController;
-    
-    // 3. Ensure we don't have duplicate listeners on the current controller
+
     _currentController!.removeListener(_onListener);
     _currentController!.addListener(_onListener);
-    
+
     _isInitialized = _currentController!.value.isInitialized;
     _isPlaying = _currentController!.value.isPlaying;
     notifyListeners();
@@ -52,7 +60,7 @@ class PlayerProvider extends ChangeNotifier {
         await _currentController!.initialize();
         _isInitialized = true;
         await _currentController!.play();
-        _currentController!.setLooping(true); // Loop by default
+        _currentController!.setLooping(true);
         await _currentController!.setPlaybackSpeed(speed);
         notifyListeners();
       } catch (e) {
@@ -60,27 +68,63 @@ class PlayerProvider extends ChangeNotifier {
         rethrow;
       }
     } else {
-      // Already initialized (from cache)
       await _currentController!.setPlaybackSpeed(speed);
-      await _currentController!.play();
+      if (!_currentController!.value.isPlaying) {
+        await _currentController!.play();
+      }
       notifyListeners();
+    }
+  }
+
+  /// Pre-initialize the next video controller in background.
+  /// Should be called after [loadCurrent] succeeds so the next swipe
+  /// can swap instantly without a black frame.
+  Future<void> preloadNext(String uri, {double speed = 1.0}) async {
+    if (_preloadedUri == uri) return; // already preloading this URI
+    if (_controllerCache.containsKey(uri)) {
+      _nextController = _controllerCache[uri];
+      _preloadedUri = uri;
+      return;
+    }
+
+    final controller = VideoPlayerController.contentUri(
+      Uri.parse(uri),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
+    _controllerCache[uri] = controller;
+    _nextController = controller;
+    _preloadedUri = uri;
+
+    _trimCache();
+
+    try {
+      await controller.initialize();
+      await controller.setPlaybackSpeed(speed);
+      controller.setLooping(true);
+      controller.pause(); // paused, ready to play on swap
+    } catch (e) {
+      debugPrint('Preload failed for $uri: $e');
+      _controllerCache.remove(uri);
+      if (_nextController == controller) {
+        _nextController = null;
+        _preloadedUri = null;
+      }
+      controller.dispose();
     }
   }
 
   void _onListener() {
     if (_currentController == null) return;
-    
+
     final value = _currentController!.value;
-    
-    // Update playing state
+
     final wasPlaying = _isPlaying;
     _isPlaying = value.isPlaying;
-    
-    // Check if finished with 50ms buffer
-    final isAtEnd = _isInitialized && 
-                   !value.isLooping && 
-                   value.position >= (value.duration - const Duration(milliseconds: 50)) && 
-                   value.duration > Duration.zero;
+
+    final isAtEnd = _isInitialized &&
+        !value.isLooping &&
+        value.position >= (value.duration - const Duration(milliseconds: 50)) &&
+        value.duration > Duration.zero;
 
     if (isAtEnd && !value.isPlaying) {
       _isFinished = true;
@@ -105,7 +149,6 @@ class PlayerProvider extends ChangeNotifier {
     } else {
       await _currentController!.play();
     }
-    // _isPlaying will be updated by _onListener
   }
 
   Future<void> pause() async {
@@ -130,7 +173,7 @@ class PlayerProvider extends ChangeNotifier {
   Future<void> stopAndClear() async {
     _currentController?.removeListener(_onListener);
     await _currentController?.pause();
-    
+
     for (final c in _controllerCache.values) {
       await c.pause();
       await c.dispose();
@@ -139,6 +182,7 @@ class PlayerProvider extends ChangeNotifier {
     _currentController = null;
     _prevController = null;
     _nextController = null;
+    _preloadedUri = null;
     _isPlaying = false;
     _isInitialized = false;
     _isFinished = false;
@@ -153,15 +197,25 @@ class PlayerProvider extends ChangeNotifier {
     if (_controllerCache.containsKey(uri)) {
       return _controllerCache[uri]!;
     }
-    // Removed mixWithOthers: true to maintain primary audio focus
-    final c = VideoPlayerController.contentUri(Uri.parse(uri));
+    final c = VideoPlayerController.contentUri(
+      Uri.parse(uri),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
     _controllerCache[uri] = c;
-    // Keep cache size bounded
+    _trimCache();
+    return c;
+  }
+
+  void _trimCache() {
     while (_controllerCache.length > 3) {
       final oldest = _controllerCache.keys.first;
-      _controllerCache.remove(oldest)?.dispose();
+      final controller = _controllerCache.remove(oldest);
+      if (controller != _currentController &&
+          controller != _prevController &&
+          controller != _nextController) {
+        controller?.dispose();
+      }
     }
-    return c;
   }
 
   // ---- cleanup ----

@@ -33,6 +33,9 @@ class RandomPicker {
     return picked;
   }
 
+  /// Check if a URI is in the recent queue.
+  bool contains(String uri) => _recent.contains(uri);
+
   /// Remove a URI from the recent queue (useful if a video is deleted).
   void forget(String uri) {
     _recent.remove(uri);

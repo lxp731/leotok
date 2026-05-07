@@ -4,7 +4,6 @@ import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/video_provider.dart';
 import '../models/scan_state.dart';
-import '../services/file_scanner.dart';
 
 /// Settings screen: manage folder paths, auto-play, refresh.
 class SettingsScreen extends StatelessWidget {
@@ -147,7 +146,7 @@ class SettingsScreen extends StatelessWidget {
   }
 
   Future<void> _addFolder(BuildContext context) async {
-    final scanner = FileScanner();
+    final scanner = context.read<VideoProvider>().scanner;
     final result = await scanner.pickAndScan();
     if (result == null) return; // user cancelled
 

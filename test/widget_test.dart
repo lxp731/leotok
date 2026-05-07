@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:leo_tok/app.dart';
+import 'package:leotok/app.dart';
 
 void main() {
   testWidgets('App renders', (WidgetTester tester) async {

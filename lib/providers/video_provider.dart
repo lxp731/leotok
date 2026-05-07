@@ -10,6 +10,7 @@ import '../utils/random_utils.dart';
 class VideoProvider extends ChangeNotifier {
   final FileScanner _scanner;
   final StorageService _storage;
+  FileScanner get scanner => _scanner;
   final RandomPicker _picker = RandomPicker(windowSize: 20);
 
   List<VideoItem> _allVideos = [];
@@ -28,11 +29,12 @@ class VideoProvider extends ChangeNotifier {
     _setupProgress();
   }
 
-  void _loadFromCache() {
-    final cached = _storage.getCachedVideos();
+  Future<void> _loadFromCache() async {
+    final cached = await _storage.getCachedVideos();
     if (cached.isNotEmpty) {
       _allVideos = cached;
       _scanState = ScanState.done;
+      notifyListeners();
     }
   }
 
@@ -71,6 +73,7 @@ class VideoProvider extends ChangeNotifier {
 
   /// Scans all configured folders. Call this manually (refresh).
   Future<void> scan(List<String> folderUris) async {
+    if (folderUris.isEmpty) return;
     // If we have videos, don't show "scanning" state to avoid blocking UI with a loader
     if (_allVideos.isEmpty) {
       _scanState = ScanState.scanning;
@@ -137,6 +140,26 @@ class VideoProvider extends ChangeNotifier {
   }
 
   // ---- playback navigation ----
+
+  /// Peek at what the next video would be without modifying state.
+  /// Returns null if library is empty or no next candidate is available.
+  VideoItem? peekNext({bool autoPick = false}) {
+    if (_allVideos.isEmpty) return null;
+
+    if (_forwardHistory.isNotEmpty) return _forwardHistory.last;
+
+    if (autoPick) {
+      final candidates = _allVideos.where((v) => !_picker.contains(v.uri)).toList();
+      if (candidates.isEmpty) return _allVideos.first;
+      candidates.shuffle();
+      return candidates.first;
+    }
+
+    if (_current == null) return _allVideos.first;
+    final idx = _allVideos.indexOf(_current!);
+    if (idx < 0) return _allVideos.first;
+    return _allVideos[(idx + 1) % _allVideos.length];
+  }
 
   /// Pick a random video and set it as current.
   /// Returns `true` if a video was picked, `false` if library is empty.

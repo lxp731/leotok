@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -45,6 +47,7 @@ class _AppLifecycleWrapper extends StatefulWidget {
 class _AppLifecycleWrapperState extends State<_AppLifecycleWrapper>
     with WidgetsBindingObserver {
   bool _wasPlayingBeforeBackground = false;
+  Timer? _resumeTimer;
 
   @override
   void initState() {
@@ -55,6 +58,7 @@ class _AppLifecycleWrapperState extends State<_AppLifecycleWrapper>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _resumeTimer?.cancel();
     super.dispose();
   }
 
@@ -66,13 +70,19 @@ class _AppLifecycleWrapperState extends State<_AppLifecycleWrapper>
     final settings = context.read<SettingsProvider>();
 
     if (state == AppLifecycleState.paused) {
+      _resumeTimer?.cancel();
       if (settings.screenOffListeningEnabled) {
-        // Some Android devices (like MI 8 / Pixel ROMs) automatically pause video players
-        // when the activity is backgrounded or screen is turned off.
-        // We attempt to override this by forcing a resume after a short delay.
-        Future.delayed(const Duration(milliseconds: 200), () {
-          if (settings.screenOffListeningEnabled && !player.isPlaying) {
-            player.resume();
+        // Some Android devices automatically pause video players when the
+        // activity is backgrounded or the screen turns off. We attempt to
+        // override this by forcing a resume after a short delay.
+        _resumeTimer = Timer(const Duration(milliseconds: 200), () {
+          if (!mounted) return;
+          final currentSettings = context.read<SettingsProvider>();
+          final currentPlayer = context.read<PlayerProvider>();
+          if (currentSettings.screenOffListeningEnabled &&
+              currentPlayer.current != null &&
+              !currentPlayer.isPlaying) {
+            currentPlayer.resume();
           }
         });
       } else {
@@ -80,6 +90,7 @@ class _AppLifecycleWrapperState extends State<_AppLifecycleWrapper>
         player.pause();
       }
     } else if (state == AppLifecycleState.resumed) {
+      _resumeTimer?.cancel();
       if (settings.autoPlayEnabled) {
         WakelockPlus.enable();
       }

@@ -169,9 +169,11 @@ class _HomeScreenState extends State<HomeScreen>
     final settings = context.read<SettingsProvider>();
     try {
       await player.loadCurrent(video.uri, speed: settings.playbackSpeed);
-      // Disable looping if auto-advance is expected (auto-play or screen-off listening)
       final shouldLoop = !settings.autoPlayEnabled && !settings.screenOffListeningEnabled;
       player.current?.setLooping(shouldLoop);
+
+      // Preload next video for instant swipe
+      _preloadNextVideo();
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -181,6 +183,27 @@ class _HomeScreenState extends State<HomeScreen>
           ),
         );
       }
+      // P1-2: Recover by going back to previous video.
+      // P1-1: If the dead URI came from forwardHistory, playNext() already
+      // removed it, so the next swipe won't hit it again.
+      final videoProvider = context.read<VideoProvider>();
+      if (videoProvider.hasHistory) {
+        videoProvider.playPrevious();
+        if (videoProvider.current != null) {
+          _loadCurrentVideo(player, videoProvider.current);
+        }
+      }
+    }
+  }
+
+  void _preloadNextVideo() {
+    final video = context.read<VideoProvider>();
+    final player = context.read<PlayerProvider>();
+    final settings = context.read<SettingsProvider>();
+    final autoAdvance = settings.autoPlayEnabled || settings.screenOffListeningEnabled;
+    final next = video.peekNext(autoPick: !autoAdvance);
+    if (next != null) {
+      player.preloadNext(next.uri, speed: settings.playbackSpeed);
     }
   }
 

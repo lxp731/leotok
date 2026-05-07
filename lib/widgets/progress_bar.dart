@@ -82,7 +82,7 @@ class VideoProgressBar extends StatelessWidget {
     if (duration.inMilliseconds == 0) return;
     final box = ctx.findRenderObject() as RenderBox;
     // Measure relative to the progress bar's horizontal bounds
-    final barWidth = box.size.width - 32; // horizontal padding
+    final barWidth = box.size.width;
     final ratio = (localX / barWidth).clamp(0.0, 1.0);
     final target = Duration(
       milliseconds: (duration.inMilliseconds * ratio).round(),

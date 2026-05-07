@@ -22,14 +22,6 @@ key.properties
 /android/app/profile
 /android/app/release
 
-# iOS/macOS
-**/ios/Flutter/Generated.xcconfig
-**/ios/Flutter/flutter_export_environment.sh
-**/ios/Flutter/.last_build_id
-**/ios/.symlinks/
-**/ios/Pods/
-**/macos/Flutter/ephemeral/
-**/ios/Flutter/ephemeral/
 
 # ----------------------------------------------------------------------------
 # IDE 相关
