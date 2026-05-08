@@ -39,6 +39,8 @@ class PlayerProvider extends ChangeNotifier {
 
     // Promote preloaded → current, demote current → prev
     if (usingPreloaded) {
+      oldController?.removeListener(_onListener);
+      oldController?.pause();
       _prevController = oldController;
       _nextController = null;
     } else if (oldController != null && oldController != newController) {
