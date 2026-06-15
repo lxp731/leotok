@@ -144,7 +144,7 @@ class _HomeScreenState extends State<HomeScreen>
       // Auto-play next video if either Auto-play or Screen-off listening is enabled
       if (settings.autoPlayEnabled || settings.screenOffListeningEnabled) {
         _isAutoPlaying = true;
-        _swipeUp().then((_) {
+        _swipeUp().whenComplete(() {
           _isAutoPlaying = false;
         });
       }
@@ -170,7 +170,7 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       await player.loadCurrent(video.uri, speed: settings.playbackSpeed);
       final shouldLoop = !settings.autoPlayEnabled && !settings.screenOffListeningEnabled;
-      player.current?.setLooping(shouldLoop);
+      await player.current?.setLooping(shouldLoop);
 
       // Preload next video for instant swipe
       _preloadNextVideo();
@@ -192,6 +192,16 @@ class _HomeScreenState extends State<HomeScreen>
         if (videoProvider.current != null) {
           _loadCurrentVideo(player, videoProvider.current);
         }
+      } else if (videoProvider.totalCount > 1) {
+        // No history (e.g. first video failed) — pick a random different one.
+        videoProvider.playRandom();
+        if (videoProvider.current != null) {
+          _loadCurrentVideo(player, videoProvider.current);
+        }
+      } else {
+        // Only one video and it's broken — stop the player so the UI
+        // doesn't show a permanent spinner.
+        await player.stopAndClear();
       }
     }
   }

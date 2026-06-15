@@ -29,8 +29,12 @@ class PlayerProvider extends ChangeNotifier {
     final oldController = _currentController;
     _isFinished = false;
 
-    // Swap in preloaded next controller if URI matches
-    final bool usingPreloaded = (uri == _preloadedUri);
+    // Only use the preloaded controller if it has actually finished initializing.
+    // _preloadedUri is now set only after preloadNext's initialize() succeeds,
+    // so this check is a belt-and-suspenders safety against the race.
+    final bool usingPreloaded = uri == _preloadedUri &&
+        _nextController != null &&
+        _nextController!.value.isInitialized;
     final newController = usingPreloaded
         ? _nextController!
         : _getOrCreate(uri);
@@ -62,7 +66,7 @@ class PlayerProvider extends ChangeNotifier {
         await _currentController!.initialize();
         _isInitialized = true;
         await _currentController!.play();
-        _currentController!.setLooping(true);
+        await _currentController!.setLooping(true);
         await _currentController!.setPlaybackSpeed(speed);
         notifyListeners();
       } catch (e) {
@@ -81,12 +85,18 @@ class PlayerProvider extends ChangeNotifier {
   /// Pre-initialize the next video controller in background.
   /// Should be called after [loadCurrent] succeeds so the next swipe
   /// can swap instantly without a black frame.
-  Future<void> preloadNext(String uri, {double speed = 1.0}) async {
-    if (_preloadedUri == uri) return; // already preloading this URI
+  ///
+  /// Returns the initialized controller on success, or null on failure.
+  /// The controller is only promoted to [_nextController] / [_preloadedUri]
+  /// **after** initialization completes, avoiding the race where
+  /// [loadCurrent] picks up a controller that is still initializing.
+  Future<VideoPlayerController?> preloadNext(String uri,
+      {double speed = 1.0}) async {
+    if (_preloadedUri == uri) return _nextController; // already ready
     if (_controllerCache.containsKey(uri)) {
       _nextController = _controllerCache[uri];
       _preloadedUri = uri;
-      return;
+      return _nextController;
     }
 
     final controller = VideoPlayerController.contentUri(
@@ -94,24 +104,25 @@ class PlayerProvider extends ChangeNotifier {
       videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
     _controllerCache[uri] = controller;
-    _nextController = controller;
-    _preloadedUri = uri;
-
+    // NOTE: do NOT set _nextController / _preloadedUri yet —
+    // they are only set after initialize() succeeds below.
     _trimCache();
 
     try {
       await controller.initialize();
       await controller.setPlaybackSpeed(speed);
-      controller.setLooping(true);
-      controller.pause(); // paused, ready to play on swap
+      await controller.setLooping(true);
+      await controller.pause(); // paused, ready to play on swap
+
+      // Only now mark as ready — safe for loadCurrent to consume.
+      _nextController = controller;
+      _preloadedUri = uri;
+      return controller;
     } catch (e) {
       debugPrint('Preload failed for $uri: $e');
       _controllerCache.remove(uri);
-      if (_nextController == controller) {
-        _nextController = null;
-        _preloadedUri = null;
-      }
       controller.dispose();
+      return null;
     }
   }
 
