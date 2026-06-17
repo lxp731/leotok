@@ -48,6 +48,8 @@ app.*.map.json
 # temp files / dev artifacts
 task.md
 ROADMAP.md
+package.json
+package-lock.json
 
 # Python
 **/__pycache__/
