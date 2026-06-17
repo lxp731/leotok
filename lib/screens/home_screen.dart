@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -13,6 +14,8 @@ import '../providers/player_provider.dart';
 import '../widgets/video_player_widget.dart';
 import '../widgets/long_press_menu.dart';
 import '../widgets/empty_guide.dart';
+import '../widgets/page_tabs.dart';
+import '../app.dart';
 
 /// The main playback screen with TikTok-style vertical swipe gestures.
 class HomeScreen extends StatefulWidget {
@@ -33,7 +36,6 @@ class _HomeScreenState extends State<HomeScreen>
   Timer? _controlsTimer;
 
   // Long-press detection
-  Timer? _longPressTimer;
   bool _longPressPrimed = false;
 
   PlayerProvider? _playerProvider;
@@ -43,6 +45,9 @@ class _HomeScreenState extends State<HomeScreen>
   // Screen-off listening countdown
   Timer? _screenOffTimer;
   int _remainingSeconds = 0;
+
+  bool get _isLandscape =>
+      MediaQuery.of(context).orientation == Orientation.landscape;
 
   @override
   void initState() {
@@ -250,6 +255,8 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails d) {
+    // Only active in landscape — portrait lets PageView handle horizontal swipes
+    if (!_isLandscape) return;
     if (!_isDragging) {
       final dx = d.globalPosition.dx - _dragStartX;
       if (dx.abs() > 60) {
@@ -310,10 +317,12 @@ class _HomeScreenState extends State<HomeScreen>
   void _onTap() {
     final player = context.read<PlayerProvider>();
     player.togglePlayPause();
-    _showControlsBriefly();
+    // Only auto-show controls in landscape (portrait controls are always visible)
+    if (_isLandscape) _showControlsBriefly();
   }
 
   void _showControlsBriefly() {
+    if (!_isLandscape) return;
     if (_controlsPermanent) return;
     setState(() => _controlsVisible = true);
     _controlsTimer?.cancel();
@@ -326,21 +335,15 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _onLongPressStart(LongPressStartDetails _) {
     _longPressPrimed = true;
-    _longPressTimer = Timer(const Duration(milliseconds: 300), () {
-      if (_longPressPrimed && mounted) {
-        _showLongPressMenu();
-      }
-    });
+    _showLongPressMenu();
   }
 
   void _onLongPressEnd(LongPressEndDetails _) {
     setState(() => _longPressPrimed = false);
-    _longPressTimer?.cancel();
   }
 
   void _onLongPressCancel() {
     setState(() => _longPressPrimed = false);
-    _longPressTimer?.cancel();
   }
 
   void _showLongPressMenu() async {
@@ -349,8 +352,6 @@ class _HomeScreenState extends State<HomeScreen>
       _longPressPrimed = false;
       _isDragging = false;
     });
-    _longPressTimer?.cancel();
-
     HapticFeedback.mediumImpact();
     final player = context.read<PlayerProvider>();
     final video = context.read<VideoProvider>();
@@ -385,10 +386,13 @@ class _HomeScreenState extends State<HomeScreen>
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('文件已永久删除')),
               );
+              // Refresh video index in background
+              final settings = context.read<SettingsProvider>();
+              video.scan(settings.folderUris);
               // After deletion, video.current is nullified in provider.
               // We need to play the next available video.
               if (!video.isEmpty) {
-                video.playNext(autoPick: context.read<SettingsProvider>().autoPlayEnabled);
+                video.playNext(autoPick: settings.autoPlayEnabled);
                 _loadCurrentVideo(player, video.current);
               }
             } else {
@@ -522,20 +526,37 @@ class _HomeScreenState extends State<HomeScreen>
           }
 
           // Main player
-          return GestureDetector(
+          final isLandscape = _isLandscape;
+          return RawGestureDetector(
+            gestures: {
+              LongPressGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+                () => LongPressGestureRecognizer(
+                  duration: const Duration(milliseconds: 500),
+                ),
+                (LongPressGestureRecognizer r) {
+                  r.onLongPressStart = _onLongPressStart;
+                  r.onLongPressEnd = _onLongPressEnd;
+                  r.onLongPressCancel = _onLongPressCancel;
+                },
+              ),
+            },
+            behavior: HitTestBehavior.opaque,
+            child: GestureDetector(
             onTap: _onTap,
             onVerticalDragStart: _onVerticalDragStart,
             onVerticalDragUpdate:
                 _longPressPrimed ? null : _onVerticalDragUpdate,
             onVerticalDragEnd: _onVerticalDragEnd,
             onVerticalDragCancel: () => setState(() => _isDragging = false),
-            onHorizontalDragStart: _onHorizontalDragStart,
-            onHorizontalDragUpdate: _onHorizontalDragUpdate,
-            onHorizontalDragEnd: _onHorizontalDragEnd,
-            onHorizontalDragCancel: () => setState(() => _isDragging = false),
-            onLongPressStart: _onLongPressStart,
-            onLongPressEnd: _onLongPressEnd,
-            onLongPressCancel: _onLongPressCancel,
+            // Horizontal gestures only active in landscape for controls show/hide.
+            // In portrait, PageView handles horizontal swipes for tab switching.
+            onHorizontalDragStart: isLandscape ? _onHorizontalDragStart : null,
+            onHorizontalDragUpdate: isLandscape ? _onHorizontalDragUpdate : null,
+            onHorizontalDragEnd: isLandscape ? _onHorizontalDragEnd : null,
+            onHorizontalDragCancel: isLandscape
+                ? () => setState(() => _isDragging = false)
+                : null,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -543,14 +564,19 @@ class _HomeScreenState extends State<HomeScreen>
                   VideoPlayerWidget(
                     controller: player.current!,
                     fileName: video.current?.name ?? '',
-                    showControls: _controlsPermanent || _controlsVisible,
+                    showControls: _isLandscape
+                        ? (_controlsPermanent || _controlsVisible)
+                        : true,
                     onTap: _onTap,
                     onDragStart: () => player.pause(),
                     onDragEnd: () => player.resume(),
                   )
                 else
                   _buildLoading(video),
+                // Page tabs overlaid on video (hidden in landscape)
+                if (!_isLandscape) _buildPageTabs(),
               ],
+            ),
             ),
           );
         },
@@ -627,12 +653,34 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Widget _buildPageTabs() {
+    final shell = context.findAncestorStateOfType<MainShellState>();
+    if (shell == null) return const SizedBox.shrink();
+    return Positioned(
+      top: MediaQuery.of(context).padding.top + 8,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: Colors.black38,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: PageTabs(
+            currentIndex: 1,
+            onTabChanged: (i) => shell.switchToTab(i),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _playerProvider?.removeListener(_autoPlayHandler);
     _settingsProvider?.removeListener(_settingsHandler);
     _controlsTimer?.cancel();
-    _longPressTimer?.cancel();
     _cancelScreenOffTimer();
     // Release wake lock on dispose
     WakelockPlus.disable();

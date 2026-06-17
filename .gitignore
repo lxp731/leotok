@@ -45,5 +45,11 @@ key.properties
 app.*.symbols
 app.*.map.json
 
-# temp files
+# temp files / dev artifacts
 task.md
+ROADMAP.md
+
+# Python
+**/__pycache__/
+**/.venv/
+*.pyc
