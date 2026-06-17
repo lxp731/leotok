@@ -78,7 +78,7 @@ def _update_callback(task: DownloadTask) -> None:
 class DownloadRequest(BaseModel):
     url: str
     start_time: str = Field(..., description="Start time, e.g. '01:30' or '1:07:25'")
-    duration: int = Field(..., gt=0, description="Duration in seconds")
+    duration: int = Field(..., ge=0, description="Duration in seconds. 0 = download full video.")
     quality: str | None = Field(default="720p", description="e.g. 480p, 720p, 1080p")
     proxy: str | None = Field(default=None, description="e.g. http://127.0.0.1:7890")
     output_dir: str | None = Field(default=None, description="Override output directory")

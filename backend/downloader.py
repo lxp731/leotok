@@ -162,17 +162,22 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
     around --download-sections.
     """
     start_sec = parse_time_to_seconds(task.start_time)
+    download_full = (start_sec == 0 and task.duration == 0)
     end_sec = start_sec + task.duration
-    start_hms = _seconds_to_hms(start_sec)
-    end_hms = _seconds_to_hms(end_sec)
-    section = f"*{start_hms}-{end_hms}"
 
-    print(f"🔍 Download segment: start_time={task.start_time!r}, duration={task.duration}")
-    print(f"   start_sec={start_sec}, end_sec={end_sec}, section={section}")
+    print(f"🔍 Download: start_time={task.start_time!r}, duration={task.duration}, "
+          f"full={download_full}")
 
-    start_str = f"{start_sec // 60:02d}{start_sec % 60:02d}"
-    end_str = f"{end_sec // 60:02d}{end_sec % 60:02d}"
-    output_template = os.path.join(output_dir, f"%(title)s_{start_str}-{end_str}.%(ext)s")
+    if download_full:
+        output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
+    else:
+        end_hms = _seconds_to_hms(end_sec)
+        start_hms = _seconds_to_hms(start_sec)
+        section = f"*{start_hms}-{end_hms}"
+        start_str = f"{start_sec // 60:02d}{start_sec % 60:02d}"
+        end_str = f"{end_sec // 60:02d}{end_sec % 60:02d}"
+        output_template = os.path.join(output_dir, f"%(title)s_{start_str}-{end_str}.%(ext)s")
+        print(f"   section={section}")
 
     # Use a temp file so yt-dlp writes the final file path after any
     # post-processing (e.g. ffmpeg trimming for --download-sections).
@@ -185,7 +190,6 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
     cmd = [
         "yt-dlp",
         "-f", _build_format_string(task.quality),
-        "--download-sections", section,
         "--no-playlist",
         "--user-agent",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -195,11 +199,19 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
         "--socket-timeout", "30",
         "--retries", "3",
         "--no-part",
-        "--downloader-args", "ffmpeg:-progress pipe:2 -nostats",
         "-o", output_template,
         "--print-to-file", "after_move:filepath", _filename_tmp,
         task.url,
     ]
+
+    if not download_full:
+        # Insert --download-sections right after the format string
+        cmd.insert(3, "--download-sections")
+        cmd.insert(4, section)
+        # Insert --downloader-args before -o
+        o_idx = cmd.index("-o")
+        cmd.insert(o_idx, "--downloader-args")
+        cmd.insert(o_idx + 1, "ffmpeg:-progress pipe:2 -nostats")
 
     if task.proxy:
         cmd.insert(1, "--proxy")

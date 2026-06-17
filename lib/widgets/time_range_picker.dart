@@ -70,7 +70,7 @@ class _TimeRangePickerState extends State<TimeRangePicker> {
             maxTotalSeconds: 360,
             onChanged: (m, s) {
               final totalSeconds = m * 60 + s;
-              if (totalSeconds > 0) {
+              if (totalSeconds >= 0) {
                 widget.onDurationChanged?.call(totalSeconds);
               }
             },
