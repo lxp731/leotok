@@ -107,20 +107,12 @@ class StorageService {
   }
 
   Future<void> setCachedVideos(List<VideoItem> videos) async {
-    final path = _cacheFilePath;
-    if (path == null) return;
-
-    try {
-      final file = File(path);
-      final json = jsonEncode(videos.map((v) => v.toMap()).toList());
-      await file.writeAsString(json);
-    } catch (e) {
-      debugPrint('Failed to write video cache: $e');
-    }
+    await _writeCachedVideosUnsafe(videos);
   }
 
   /// One-time migration: read old SharedPreferences StringList cache,
   /// write it to the JSON file, then clear the legacy key.
+  /// Only clears the legacy key after confirming the JSON write succeeded.
   Future<List<VideoItem>> _migrateFromSharedPrefs() async {
     final legacy = _prefs.getStringList(_keyVideoCache);
     if (legacy == null || legacy.isEmpty) return [];
@@ -134,9 +126,25 @@ class StorageService {
     }).whereType<VideoItem>().toList();
 
     if (videos.isNotEmpty) {
-      await setCachedVideos(videos);
+      final wrote = await _writeCachedVideosUnsafe(videos);
+      if (!wrote) return videos; // keep legacy data if JSON write failed
     }
     await _prefs.remove(_keyVideoCache);
     return videos;
+  }
+
+  /// Write video cache to JSON file. Returns true on success.
+  Future<bool> _writeCachedVideosUnsafe(List<VideoItem> videos) async {
+    final path = _cacheFilePath;
+    if (path == null) return false;
+    try {
+      final file = File(path);
+      final json = jsonEncode(videos.map((v) => v.toMap()).toList());
+      await file.writeAsString(json);
+      return true;
+    } catch (e) {
+      debugPrint('Failed to write video cache: $e');
+      return false;
+    }
   }
 }

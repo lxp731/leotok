@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 /// Controls the Android foreground service that keeps audio playing
 /// when the screen is off (screen-off listening mode).
 class AudioBackgroundService {
-  static const _channel = MethodChannel('com.localtok.local_tok/saf');
+  static const _channel = MethodChannel('com.localtok.local_tok/background_audio');
 
   /// Start the foreground notification service.
   /// Required for keeping audio alive when screen turns off.

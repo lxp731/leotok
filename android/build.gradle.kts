@@ -19,6 +19,12 @@ subprojects {
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
 subprojects {
+    tasks.withType(org.gradle.api.tasks.compile.JavaCompile::class.java) {
+        options.compilerArgs.add("-Xlint:-options")
+    }
+}
+
+subprojects {
     project.evaluationDependsOn(":app")
 }
 

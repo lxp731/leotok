@@ -33,6 +33,7 @@ class VideoProvider extends ChangeNotifier {
     final cached = await _storage.getCachedVideos();
     if (cached.isNotEmpty) {
       _allVideos = cached;
+      _allVideos.shuffle(); // Randomize order, consistent with scan()
       _scanState = ScanState.done;
       notifyListeners();
     }
@@ -114,17 +115,25 @@ class VideoProvider extends ChangeNotifier {
 
       _allVideos = results;
       _allVideos.shuffle(); // Shuffle globally to break directory-based ordering
-      
+
       _scanState = results.isEmpty ? ScanState.empty : ScanState.done;
       _scanPercent = 1.0;
       _currentScanningFolder = null;
       _scanningCount = 0;
       _storage.setCachedVideos(_allVideos);
 
-      // Reset picker and history since the library has changed significantly
-      _picker.clear();
-      _backwardHistory.clear();
-      _forwardHistory.clear();
+      // Only reset picker and history if the library actually changed.
+      // Compare old vs new URIs: a background scan that finds the same
+      // files should not destroy the user's navigation state.
+      final oldUris = oldMap.keys.toSet();
+      final newUris = results.map((v) => v.uri).toSet();
+      final libraryChanged =
+          oldUris.length != newUris.length || !oldUris.containsAll(newUris);
+      if (libraryChanged) {
+        _picker.clear();
+        _backwardHistory.clear();
+        _forwardHistory.clear();
+      }
 
       if (somePermissionsLost) {
         _scanError = '部分文件夹权限已失效，请重新添加。';
@@ -150,7 +159,13 @@ class VideoProvider extends ChangeNotifier {
 
     if (autoPick) {
       final candidates = _allVideos.where((v) => !_picker.contains(v.uri)).toList();
-      if (candidates.isEmpty) return _allVideos.first;
+      if (candidates.isEmpty) {
+        // All videos are in the recent window (small library).
+        // The next actual pick will clear the window, so preload from the
+        // full pool for consistency.
+        final shuffled = _allVideos.toList()..shuffle();
+        return shuffled.first;
+      }
       candidates.shuffle();
       return candidates.first;
     }
@@ -195,10 +210,13 @@ class VideoProvider extends ChangeNotifier {
     VideoItem next;
     if (autoPick) {
       next = _picker.pick(_allVideos);
-    } else {
+    } else if (_current != null) {
       final idx = _allVideos.indexOf(_current!);
       final nextIdx = (idx + 1) % _allVideos.length;
       next = _allVideos[nextIdx];
+    } else {
+      // _current was null (e.g. after deletion) — pick the first video.
+      next = _allVideos.first;
     }
     if (_current != null) {
       _addToBackwardHistory(_current!);
@@ -251,7 +269,10 @@ class VideoProvider extends ChangeNotifier {
     _allVideos.removeWhere((v) => v.folder == folderUri);
     _backwardHistory.removeWhere((v) => v.folder == folderUri);
     _forwardHistory.removeWhere((v) => v.folder == folderUri);
-    _picker.forget(folderUri);
+    // Clear the entire picker — individual video URIs from this folder
+    // are already gone from _allVideos, and forget() expects video URIs,
+    // not folder URIs (previous code passed folderUri which was a no-op).
+    _picker.clear();
     if (_current != null && _current!.folder == folderUri) {
       _current = null;
     }

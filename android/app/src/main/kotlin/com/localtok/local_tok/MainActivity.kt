@@ -14,7 +14,8 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterFragmentActivity() {
     private val SAF_CHANNEL = "com.localtok.local_tok/saf"
-    private var methodChannel: MethodChannel? = null
+    private val AUDIO_SERVICE_CHANNEL = "com.localtok.local_tok/background_audio"
+    private var safChannel: MethodChannel? = null
     private var pendingResult: MethodChannel.Result? = null
 
     // ... (pickFolderLauncher remains largely same, just call the new scan logic)
@@ -39,8 +40,10 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SAF_CHANNEL)
-        methodChannel?.setMethodCallHandler { call, result ->
+
+        // SAF file operations channel
+        safChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SAF_CHANNEL)
+        safChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "pickAndScan" -> {
                     pendingResult = result
@@ -70,6 +73,17 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }.start()
                 }
+                else -> result.notImplemented()
+            }
+        }
+
+        // Background audio service channel
+        val audioServiceChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AUDIO_SERVICE_CHANNEL
+        )
+        audioServiceChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
                 "startBackgroundService" -> {
                     startBackgroundService()
                     result.success(true)
@@ -163,7 +177,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun reportProgress(count: Int, folderName: String?) {
         runOnUiThread {
-            methodChannel?.invokeMethod("onProgress", mapOf(
+            safChannel?.invokeMethod("onProgress", mapOf(
                 "count" to count,
                 "currentFolder" to folderName
             ))

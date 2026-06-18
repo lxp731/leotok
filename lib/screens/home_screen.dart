@@ -41,6 +41,9 @@ class _HomeScreenState extends State<HomeScreen>
   PlayerProvider? _playerProvider;
   SettingsProvider? _settingsProvider;
   bool _isAutoPlaying = false;
+  bool _isDeleting = false;
+  bool _permanentLoadFailure = false;
+  bool _isLoadingVideo = false;
 
   // Screen-off listening countdown
   Timer? _screenOffTimer;
@@ -64,6 +67,10 @@ class _HomeScreenState extends State<HomeScreen>
 
     _settingsProvider = context.read<SettingsProvider>();
     _settingsProvider!.addListener(_settingsHandler);
+    // Sync initial state: the provider may have already loaded settings
+    // (e.g. autoPlayEnabled) before this listener was registered, so we
+    // need to apply the current settings once on startup.
+    _settingsHandler();
   }
 
   void _settingsHandler() {
@@ -168,17 +175,25 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  int _loadRetryCount = 0;
+  static const int _maxLoadRetries = 5;
+
   Future<void> _loadCurrentVideo(
       PlayerProvider player, VideoItem? video) async {
-    if (video == null) return;
+    if (video == null || _isLoadingVideo) return;
+    _isLoadingVideo = true;
     final settings = context.read<SettingsProvider>();
     try {
       await player.loadCurrent(video.uri, speed: settings.playbackSpeed);
       final shouldLoop = !settings.autoPlayEnabled && !settings.screenOffListeningEnabled;
       await player.current?.setLooping(shouldLoop);
 
-      // Preload next video for instant swipe
+      // Preload next video for instant swipe (fire-and-forget — should not
+      // block the current video from being displayed).
       _preloadNextVideo();
+      _loadRetryCount = 0; // reset on success
+      _permanentLoadFailure = false;
+      _isLoadingVideo = false;
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -188,8 +203,17 @@ class _HomeScreenState extends State<HomeScreen>
           ),
         );
       }
-      // P1-2: Recover by going back to previous video.
-      // P1-1: If the dead URI came from forwardHistory, playNext() already
+      // Circuit breaker: if too many consecutive load failures, stop trying.
+      _loadRetryCount++;
+      if (_loadRetryCount > _maxLoadRetries) {
+        _loadRetryCount = 0;
+        _permanentLoadFailure = true;
+        _isLoadingVideo = false;
+        await player.stopAndClear();
+        return;
+      }
+      // Recover by going back to previous video.
+      // If the dead URI came from forwardHistory, playNext() already
       // removed it, so the next swipe won't hit it again.
       final videoProvider = context.read<VideoProvider>();
       if (videoProvider.hasHistory) {
@@ -206,6 +230,8 @@ class _HomeScreenState extends State<HomeScreen>
       } else {
         // Only one video and it's broken — stop the player so the UI
         // doesn't show a permanent spinner.
+        _permanentLoadFailure = true;
+        _isLoadingVideo = false;
         await player.stopAndClear();
       }
     }
@@ -286,6 +312,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _swipeUp() async {
+    _permanentLoadFailure = false; // user explicitly requesting next video
     final video = context.read<VideoProvider>();
     final player = context.read<PlayerProvider>();
 
@@ -299,6 +326,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _swipeDown() async {
+    _permanentLoadFailure = false; // user explicitly requesting previous video
     final video = context.read<VideoProvider>();
     final player = context.read<PlayerProvider>();
 
@@ -306,8 +334,7 @@ class _HomeScreenState extends State<HomeScreen>
       video.playPrevious();
       await _loadCurrentVideo(player, video.current);
     } else {
-      // No history → re-roll random
-      video.playRandom();
+      video.resetAndPlayRandom();
       await _loadCurrentVideo(player, video.current);
     }
   }
@@ -378,6 +405,10 @@ class _HomeScreenState extends State<HomeScreen>
           // Close menu
           Navigator.pop(context);
 
+          // Mark that we're deleting so the post-menu resume() below
+          // doesn't fire on a controller whose file is about to be deleted.
+          _isDeleting = true;
+
           // Perform deletion
           final success = await video.deleteVideo(videoToDel);
 
@@ -391,8 +422,11 @@ class _HomeScreenState extends State<HomeScreen>
               video.scan(settings.folderUris);
               // After deletion, video.current is nullified in provider.
               // We need to play the next available video.
+              // autoPick logic: same as _swipeUp — when auto-play or
+              // screen-off-listening is on, play sequentially; otherwise random.
+              final autoAdvance = settings.autoPlayEnabled || settings.screenOffListeningEnabled;
               if (!video.isEmpty) {
-                video.playNext(autoPick: settings.autoPlayEnabled);
+                video.playNext(autoPick: !autoAdvance);
                 _loadCurrentVideo(player, video.current);
               }
             } else {
@@ -428,14 +462,17 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
 
-    // Resume only after everything (menu or settings) is closed
-    // ADDED: only resume if we still have videos!
-    if (wasPlaying && mounted) {
-      final video = context.read<VideoProvider>();
-      if (!video.isEmpty) {
+    // Resume only after everything (menu or settings) is closed.
+    // Skip if a deletion is in progress — the delete handler takes care
+    // of loading the next video; calling resume() here would target the
+    // old (now-deleted) controller and corrupt the player state.
+    if (wasPlaying && mounted && !_isDeleting) {
+      final currentVideo = context.read<VideoProvider>();
+      if (!currentVideo.isEmpty) {
         player.resume();
       }
     }
+    _isDeleting = false;
   }
 
   void _openSettings() async {
@@ -508,21 +545,28 @@ class _HomeScreenState extends State<HomeScreen>
           // We have videos — start playback if not already started
           final isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? false;
           if (isCurrentRoute && video.current != null && player.current == null) {
-            // Picked a video but player not loaded yet
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (player.current == null) {
-                _loadCurrentVideo(player, video.current);
-              }
-            });
+            // Picked a video but player not loaded yet.
+            // Skip if we previously hit a permanent load failure — let the
+            // user swipe manually to retry instead of re-triggering the
+            // same failing load in an infinite loop.
+            if (!_permanentLoadFailure) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (player.current == null && !_permanentLoadFailure) {
+                  _loadCurrentVideo(player, video.current);
+                }
+              });
+            }
           } else if (isCurrentRoute && video.current == null && video.totalCount > 0) {
             // Scan completed but no video picked yet
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (video.current == null) {
-                video.playRandom();
-                _loadCurrentVideo(
-                    context.read<PlayerProvider>(), video.current);
-              }
-            });
+            if (!_permanentLoadFailure) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (video.current == null) {
+                  video.playRandom();
+                  _loadCurrentVideo(
+                      context.read<PlayerProvider>(), video.current);
+                }
+              });
+            }
           }
 
           // Main player

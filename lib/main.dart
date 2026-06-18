@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'app.dart';
 import 'providers/player_provider.dart';
@@ -75,6 +76,12 @@ class _AppLifecycleWrapperState extends State<_AppLifecycleWrapper>
     if (state == AppLifecycleState.paused) {
       // Always pause when leaving the app. User must manually resume.
       context.read<PlayerProvider>().pause();
+    } else if (state == AppLifecycleState.resumed) {
+      // Re-apply wake lock in case the system released it while backgrounded.
+      // Some OEM ROMs clear wake locks when the app goes to background.
+      if (context.read<SettingsProvider>().autoPlayEnabled) {
+        WakelockPlus.enable();
+      }
     }
   }
 

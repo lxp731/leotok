@@ -40,7 +40,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         return;
       }
 
-      final filePath = '/sdcard/Download/${task.filename}';
+      // Use the exact filepath returned by the backend (respects custom download dir).
+      // Fall back to /sdcard/Download/<filename> for tasks created before filepath was tracked.
+      final filePath = task.filepath ?? '/sdcard/Download/${task.filename}';
       final file = File(filePath);
       if (!await file.exists()) {
         setState(() => _error = '文件不存在: $filePath');

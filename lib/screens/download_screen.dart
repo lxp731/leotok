@@ -467,5 +467,5 @@ class _ControlsDelegate extends SliverPersistentHeaderDelegate {
   }
 
   @override
-  bool shouldRebuild(covariant _ControlsDelegate oldDelegate) => true;
+  bool shouldRebuild(covariant _ControlsDelegate oldDelegate) => false;
 }

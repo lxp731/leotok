@@ -50,9 +50,16 @@ class PlayerProvider extends ChangeNotifier {
     } else if (oldController != null && oldController != newController) {
       oldController.removeListener(_onListener);
       oldController.pause();
+      // Don't clear _nextController — it may be protecting an in-progress
+      // preload from being disposed by _trimCache.  It will be overwritten
+      // by the next _preloadNextVideo call, and loadCurrent guards against
+      // using an uninitialized controller via the isInitialized check.
     }
 
     _currentController = newController;
+
+    // Safe to trim now — the new controller is protected as _currentController.
+    _trimCache();
 
     _currentController!.removeListener(_onListener);
     _currentController!.addListener(_onListener);
@@ -94,9 +101,16 @@ class PlayerProvider extends ChangeNotifier {
       {double speed = 1.0}) async {
     if (_preloadedUri == uri) return _nextController; // already ready
     if (_controllerCache.containsKey(uri)) {
-      _nextController = _controllerCache[uri];
-      _preloadedUri = uri;
-      return _nextController;
+      final cached = _controllerCache[uri];
+      // Only promote to _nextController if the cached controller is fully
+      // initialized. Otherwise we'd advertise an uninitialized controller
+      // as ready, and loadCurrent's isInitialized guard would reject it.
+      if (cached!.value.isInitialized) {
+        _nextController = cached;
+        _preloadedUri = uri;
+        return _nextController;
+      }
+      // Still initializing — fall through and wait for it, or create fresh.
     }
 
     final controller = VideoPlayerController.contentUri(
@@ -104,8 +118,10 @@ class PlayerProvider extends ChangeNotifier {
       videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
     _controllerCache[uri] = controller;
-    // NOTE: do NOT set _nextController / _preloadedUri yet —
-    // they are only set after initialize() succeeds below.
+    // Set _nextController BEFORE _trimCache so the in-progress controller
+    // is considered "active" and won't be disposed while initializing.
+    // loadCurrent's isInitialized guard will still reject it until ready.
+    _nextController = controller;
     _trimCache();
 
     try {
@@ -114,13 +130,14 @@ class PlayerProvider extends ChangeNotifier {
       await controller.setLooping(true);
       await controller.pause(); // paused, ready to play on swap
 
-      // Only now mark as ready — safe for loadCurrent to consume.
-      _nextController = controller;
+      // Mark as ready for loadCurrent consumption.
       _preloadedUri = uri;
       return controller;
     } catch (e) {
       debugPrint('Preload failed for $uri: $e');
       _controllerCache.remove(uri);
+      _nextController = null;
+      _preloadedUri = null;
       controller.dispose();
       return null;
     }
@@ -208,25 +225,48 @@ class PlayerProvider extends ChangeNotifier {
 
   VideoPlayerController _getOrCreate(String uri) {
     if (_controllerCache.containsKey(uri)) {
-      return _controllerCache[uri]!;
+      final cached = _controllerCache[uri]!;
+      // Only reuse if fully initialized.  Otherwise (e.g. a preload is
+      // still in progress) calling initialize() on it again would cause
+      // "VideoPlayerController used after being disposed".
+      if (cached.value.isInitialized) {
+        return cached;
+      }
+      // Cached but uninitialized — remove and create fresh to avoid
+      // double-initialize collision with the in-progress preload.
+      _controllerCache.remove(uri);
     }
     final c = VideoPlayerController.contentUri(
       Uri.parse(uri),
       videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
     _controllerCache[uri] = c;
-    _trimCache();
+    // Don't trim here — the caller (loadCurrent / preloadNext) will trim
+    // after protecting the new controller via _currentController or
+    // _nextController.  Trimming now could dispose this very controller.
     return c;
   }
 
   void _trimCache() {
     while (_controllerCache.length > 3) {
-      final oldest = _controllerCache.keys.first;
-      final controller = _controllerCache.remove(oldest);
-      if (controller != _currentController &&
-          controller != _prevController &&
-          controller != _nextController) {
-        controller?.dispose();
+      // Find a non-active entry to evict, starting from the oldest.
+      String? toEvict;
+      for (final key in _controllerCache.keys) {
+        final c = _controllerCache[key];
+        if (c != _currentController &&
+            c != _prevController &&
+            c != _nextController) {
+          toEvict = key;
+          break;
+        }
+      }
+      if (toEvict != null) {
+        final evicted = _controllerCache.remove(toEvict);
+        evicted?.removeListener(_onListener); // prevent "used after disposed" error
+        evicted?.dispose();
+      } else {
+        // All cached controllers are active — can't trim further.
+        break;
       }
     }
   }
