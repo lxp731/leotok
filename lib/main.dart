@@ -73,13 +73,34 @@ class _AppLifecycleWrapperState extends State<_AppLifecycleWrapper>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
 
+    final settings = context.read<SettingsProvider>();
+    final player = context.read<PlayerProvider>();
+
     if (state == AppLifecycleState.paused) {
-      // Always pause when leaving the app. User must manually resume.
-      context.read<PlayerProvider>().pause();
+      // Screen-off listening: keep audio playing in background.
+      // The Android foreground service (BackgroundAudioService) holds a
+      // PARTIAL_WAKE_LOCK to keep the CPU alive while screen is off.
+      if (settings.screenOffListeningEnabled && player.isPlaying) {
+        // Arm the keep-alive so the periodic timer in HomeScreen knows the
+        // pause was system-induced (screen off), not user-initiated.
+        player.enableAudioKeepAlive();
+        // Some Android systems / OEM ROMs may still pause the underlying
+        // ExoPlayer when the activity goes to background.  Schedule a
+        // deferred resume as defense-in-depth — the native lifecycle
+        // cascade runs after this callback returns, so we wait briefly
+        // then force-play if the player was paused underneath us.
+        Future.delayed(const Duration(milliseconds: 800), () {
+          if (player.audioKeepAlive && player.isInitialized && !player.isPlaying && !player.isFinished) {
+            player.resume();
+          }
+        });
+        return; // let it play — don't pause at the Flutter level
+      }
+      player.pause();
     } else if (state == AppLifecycleState.resumed) {
-      // Re-apply wake lock in case the system released it while backgrounded.
-      // Some OEM ROMs clear wake locks when the app goes to background.
-      if (context.read<SettingsProvider>().autoPlayEnabled) {
+      if (settings.autoPlayEnabled) {
+        // Re-apply wake lock in case the system released it while backgrounded.
+        // Some OEM ROMs clear wake locks when the app goes to background.
         WakelockPlus.enable();
       }
     }

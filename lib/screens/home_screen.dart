@@ -92,6 +92,7 @@ class _HomeScreenState extends State<HomeScreen>
       _startScreenOffTimer();
     } else {
       _cancelScreenOffTimer();
+      _playerProvider?.disableAudioKeepAlive();
     }
   }
 
@@ -125,6 +126,17 @@ class _HomeScreenState extends State<HomeScreen>
       if (_remainingSeconds <= 0) {
         timer.cancel();
         _onScreenOffTimerExpired();
+        return;
+      }
+
+      // Keep-alive: the native video_player plugin or the Android system may
+      // pause ExoPlayer when the screen turns off, even though we skip the
+      // Flutter-level pause in the lifecycle handler.  Only resume when
+      // audioKeepAlive is armed — this ensures a user-initiated pause (tap)
+      // before locking is respected and won't be auto-resumed.
+      final p = _playerProvider;
+      if (p != null && p.audioKeepAlive && p.isInitialized && !p.isPlaying && !p.isFinished) {
+        p.resume();
       }
     });
   }
@@ -137,6 +149,7 @@ class _HomeScreenState extends State<HomeScreen>
   void _onScreenOffTimerExpired() {
     if (!mounted) return;
     final player = context.read<PlayerProvider>();
+    player.disableAudioKeepAlive();
     player.pause();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -343,7 +356,13 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _onTap() {
     final player = context.read<PlayerProvider>();
+    final wasPlaying = player.isPlaying;
     player.togglePlayPause();
+    // If the user manually paused while screen-off listening is active,
+    // disarm the keep-alive so the timer won't auto-resume.
+    if (wasPlaying && _settingsProvider?.screenOffListeningEnabled == true) {
+      player.disableAudioKeepAlive();
+    }
     // Only auto-show controls in landscape (portrait controls are always visible)
     if (_isLandscape) _showControlsBriefly();
   }

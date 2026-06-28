@@ -22,6 +22,15 @@ class PlayerProvider extends ChangeNotifier {
   bool get isPlaying => _isPlaying;
   bool get isInitialized => _isInitialized;
 
+  /// When true, the periodic keep-alive timer in HomeScreen is allowed to
+  /// resume playback after an external (system-level) pause.  Set only when
+  /// the app is backgrounded while actively playing with screen-off listening
+  /// enabled.  Cleared on user-initiated pause, timer expiry, or feature off.
+  bool _audioKeepAlive = false;
+  bool get audioKeepAlive => _audioKeepAlive;
+  void enableAudioKeepAlive() => _audioKeepAlive = true;
+  void disableAudioKeepAlive() => _audioKeepAlive = false;
+
   // ---- lifecycle ----
 
   /// Set a new current video.
