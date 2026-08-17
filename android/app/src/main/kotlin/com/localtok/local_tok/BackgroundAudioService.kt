@@ -14,6 +14,9 @@ import android.os.PowerManager
 /**
  * Foreground service that keeps the app process alive during screen-off listening.
  * Shows a persistent notification indicating that LeoTok is playing in the background.
+ *
+ * The PARTIAL_WAKE_LOCK is held ONLY while audio is actually playing (see
+ * [setPlaying]) — merely enabling screen-off listening must not drain battery.
  */
 class BackgroundAudioService : Service() {
 
@@ -21,18 +24,28 @@ class BackgroundAudioService : Service() {
         const val CHANNEL_ID = "leotok_playback"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.localtok.local_tok.STOP_BACKGROUND_AUDIO"
-    }
 
-    private var wakeLock: PowerManager.WakeLock? = null
+        @Volatile
+        private var wakeLock: PowerManager.WakeLock? = null
+
+        /** Acquire/release the CPU wake lock based on actual playback state. */
+        fun setPlaying(playing: Boolean) {
+            val wl = wakeLock
+            if (wl == null) return
+            if (playing && !wl.isHeld) {
+                wl.acquire()
+            } else if (!playing && wl.isHeld) {
+                wl.release()
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        
-        // Acquire wake lock to keep CPU alive when screen is off
+        // NOTE: the wake lock is NOT acquired here — see setPlaying().
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LeoTok:WakeLock")
-        wakeLock?.acquire()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -50,6 +63,7 @@ class BackgroundAudioService : Service() {
                 it.release()
             }
         }
+        wakeLock = null
         super.onDestroy()
     }
 

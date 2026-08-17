@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../models/download_task.dart';
 import '../services/api_service.dart';
@@ -85,15 +86,23 @@ class DownloadProvider extends ChangeNotifier {
 
   void _startPolling(String taskId) {
     _pollTimer?.cancel();
+    _pollErrorCount = 0;
     _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       await _pollTask(taskId);
     });
   }
 
+  /// Consecutive poll failures before the task is marked failed and polling
+  /// stops (~10s at 500ms interval). Prevents an unreachable/restarted
+  /// backend from leaving the UI stuck on "下载进行中" forever.
+  static const int _maxPollErrors = 20;
+  int _pollErrorCount = 0;
+
   Future<void> _pollTask(String taskId) async {
     try {
       final updated = await _api.getTask(taskId);
       _tasks[taskId] = updated;
+      _pollErrorCount = 0;
 
       if (!updated.isActive) {
         // Download finished (or failed/cancelled)
@@ -103,9 +112,38 @@ class DownloadProvider extends ChangeNotifier {
         }
       }
       notifyListeners();
+    } on DioException catch (e) {
+      // 404 = the backend no longer knows this task (e.g. server restarted).
+      // Treat it as terminal immediately; other network errors get a grace
+      // period before giving up.
+      final taskGone = e.response?.statusCode == 404;
+      _pollErrorCount++;
+      if (taskGone || _pollErrorCount >= _maxPollErrors) {
+        _failPolling(taskId, taskGone
+            ? '后端已重启，任务状态丢失'
+            : '连接后端失败（网络错误）');
+      }
     } catch (_) {
-      // Network error polling — don't crash, just skip a beat
+      _pollErrorCount++;
+      if (_pollErrorCount >= _maxPollErrors) {
+        _failPolling(taskId, '连接后端失败（网络错误）');
+      }
     }
+  }
+
+  /// Marks the task as failed and stops polling so the UI unblocks.
+  void _failPolling(String taskId, String message) {
+    final task = _tasks[taskId];
+    if (task != null && task.isActive) {
+      task.status = 'failed';
+      task.error = message;
+    }
+    if (taskId == _activeTaskId) {
+      _activeTaskId = null;
+      _pollTimer?.cancel();
+    }
+    _pollErrorCount = 0;
+    notifyListeners();
   }
 
   /// Cancel the active download.
@@ -117,7 +155,16 @@ class DownloadProvider extends ChangeNotifier {
     _tasks[_activeTaskId]?.status = 'cancelled';
     _activeTaskId = null;
     _pollTimer?.cancel();
+    _pollErrorCount = 0;
     notifyListeners();
+  }
+
+  /// Point the HTTP client at a new backend URL (used when the user edits
+  /// the server URL in settings — takes effect immediately, no restart).
+  void updateServerUrl(String url) {
+    _api.updateBaseUrl(url);
+    _serverOnline = false;
+    checkServer();
   }
 
   /// Delete a completed download (file + server record).

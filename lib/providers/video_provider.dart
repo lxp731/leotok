@@ -24,6 +24,13 @@ class VideoProvider extends ChangeNotifier {
   String? _currentScanningFolder;
   double _scanPercent = 0.0;
 
+  /// Whether a scan is running right now, independent of [_scanState].
+  /// [_scanState] only flips to `scanning` when the library is empty (so a
+  /// background refresh never blanks the playing screen), but the settings
+  /// UI needs to know a refresh is in progress even when videos already
+  /// exist — that's what this flag is for.
+  bool _scanInProgress = false;
+
   VideoProvider(this._scanner, this._storage) {
     _loadFromCache();
     _setupProgress();
@@ -59,6 +66,7 @@ class VideoProvider extends ChangeNotifier {
   int get scanningCount => _scanningCount;
   String? get currentScanningFolder => _currentScanningFolder;
   double get scanPercent => _scanPercent;
+  bool get isScanning => _scanInProgress;
 
   // ---- scanning ----
 
@@ -75,6 +83,11 @@ class VideoProvider extends ChangeNotifier {
   /// Scans all configured folders. Call this manually (refresh).
   Future<void> scan(List<String> folderUris) async {
     if (folderUris.isEmpty) return;
+    // Guard against concurrent scans (double-tap refresh, or a startup scan
+    // racing a user-triggered refresh): run one at a time.
+    if (_scanInProgress) return;
+    _scanInProgress = true;
+
     // If we have videos, don't show "scanning" state to avoid blocking UI with a loader
     if (_allVideos.isEmpty) {
       _scanState = ScanState.scanning;
@@ -144,6 +157,8 @@ class VideoProvider extends ChangeNotifier {
         _scanError = e.toString();
         _scanState = ScanState.error;
       }
+    } finally {
+      _scanInProgress = false;
     }
     notifyListeners();
   }

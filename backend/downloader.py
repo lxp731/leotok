@@ -11,9 +11,10 @@ import re
 import signal
 import subprocess
 import tempfile
+import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable
 
 
 @dataclass
@@ -36,7 +37,12 @@ class DownloadTask:
     filepath: str | None = None
     filesize: str | None = None
     error: str | None = None
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    created_at: str = field(
+        # Naive local time on purpose: the Flutter app parses this with
+        # DateTime.parse() and renders the wall-clock time — a tz-aware UTC
+        # string would shift the displayed hour by the device's offset.
+        default_factory=lambda: datetime.now().isoformat()  # noqa: DTZ005
+    )
 
     # Internal handle for cancellation
     _cancelled: bool = field(default=False, repr=False)
@@ -44,6 +50,7 @@ class DownloadTask:
 
 
 # ---- Time parsing (from pd bash script) ----
+
 
 def parse_time_to_seconds(time_str: str) -> int:
     """Parse MM:SS or HH:MM:SS to total seconds.
@@ -61,7 +68,9 @@ def parse_time_to_seconds(time_str: str) -> int:
         hours, minutes, seconds = int(parts[0]), int(parts[1]), int(parts[2])
         return hours * 3600 + minutes * 60 + seconds
     else:
-        raise ValueError(f"Unsupported time format: {time_str!r}, use MM:SS or HH:MM:SS")
+        raise ValueError(
+            f"Unsupported time format: {time_str!r}, use MM:SS or HH:MM:SS"
+        )
 
 
 def _seconds_to_hms(total_sec: int) -> str:
@@ -73,6 +82,7 @@ def _seconds_to_hms(total_sec: int) -> str:
 
 
 # ---- Format string builder ----
+
 
 def _build_format_string(quality: str = "720p") -> str:
     """Build the yt-dlp format selection string.
@@ -118,9 +128,7 @@ _FULL_PROGRESS_RE = re.compile(
 _FFMPEG_TIME_RE = re.compile(r"^out_time=(\d+):(\d+):([\d.]+)")
 
 
-def _parse_progress(
-    line: str, task: DownloadTask, total_duration: int = 0
-) -> None:
+def _parse_progress(line: str, task: DownloadTask, total_duration: int = 0) -> None:
     """Extract progress / speed / ETA from a yt-dlp / ffmpeg stderr line."""
     if task._cancelled:
         return
@@ -155,6 +163,7 @@ def _parse_progress(
 
 # ---- Main download function ----
 
+
 def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -> None:
     """Download a video segment by calling the yt-dlp CLI (subprocess).
 
@@ -162,50 +171,76 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
     around --download-sections.
     """
     start_sec = parse_time_to_seconds(task.start_time)
-    download_full = (start_sec == 0 and task.duration == 0)
+    download_full = start_sec == 0 and task.duration == 0
     end_sec = start_sec + task.duration
 
-    print(f"🔍 Download: start_time={task.start_time!r}, duration={task.duration}, "
-          f"full={download_full}")
+    print(
+        f"🔍 Download: start_time={task.start_time!r}, duration={task.duration}, "
+        f"full={download_full}"
+    )
 
     if download_full:
         output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
+        section = None
     else:
         end_hms = _seconds_to_hms(end_sec)
         start_hms = _seconds_to_hms(start_sec)
         section = f"*{start_hms}-{end_hms}"
         start_str = f"{start_sec // 60:02d}{start_sec % 60:02d}"
         end_str = f"{end_sec // 60:02d}{end_sec % 60:02d}"
-        output_template = os.path.join(output_dir, f"%(title)s_{start_str}-{end_str}.%(ext)s")
+        output_template = os.path.join(
+            output_dir, f"%(title)s_{start_str}-{end_str}.%(ext)s"
+        )
         print(f"   section={section}")
 
-    # Use a temp file so yt-dlp writes the final file path after any
+    # Use temp files so yt-dlp writes the final file path after any
     # post-processing (e.g. ffmpeg trimming for --download-sections).
-    _filename_info = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
-    _filename_info.close()
-    _filename_tmp = _filename_info.name
+    # mkstemp gives us just a filename to hand to --print-to-file.
+    _filename_fd, _filename_tmp = tempfile.mkstemp(suffix=".txt")
+    os.close(_filename_fd)
+
+    # Second temp file: pre_process:filepath is written BEFORE the download
+    # starts, so a cancelled/killed download still knows which partial file
+    # to clean up. (after_move only fires on success.)
+    _early_fd, _early_tmp = tempfile.mkstemp(suffix=".txt")
+    os.close(_early_fd)
 
     output_file: str | None = None
 
     cmd = [
         "yt-dlp",
-        "-f", _build_format_string(task.quality),
+        "-f",
+        _build_format_string(task.quality),
         "--no-playlist",
         "--user-agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36",
-        "--impersonate", "chrome",
-        "--socket-timeout", "30",
-        "--retries", "3",
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "--impersonate",
+        "chrome",
+        "--socket-timeout",
+        "30",
+        "--retries",
+        "3",
         "--no-part",
-        "-o", output_template,
-        "--print-to-file", "after_move:filepath", _filename_tmp,
+        "-o",
+        output_template,
+        "--print-to-file",
+        "after_move:filepath",
+        _filename_tmp,
+        "--print-to-file",
+        "pre_process:filepath",
+        _early_tmp,
         task.url,
     ]
 
     if not download_full:
-        # Insert --download-sections right after the format string
+        # Insert --download-sections right after the format string.
+        # section is defined in the else-branch above under exactly the same
+        # condition (start_sec == 0 and duration == 0 → full download).
+        assert section is not None
         cmd.insert(3, "--download-sections")
         cmd.insert(4, section)
         # Insert --downloader-args before -o
@@ -219,23 +254,34 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
 
     print(f"   cmd: {' '.join(cmd)}")
 
-    def _read_filename_from_temp() -> None:
-        """Read the actual output file path that yt-dlp saved via --print-to-file."""
-        nonlocal output_file
+    def _read_path_from_temp(path: str) -> str | None:
+        """Read a single path that yt-dlp printed via --print-to-file."""
         try:
-            with open(_filename_tmp) as f:
-                path = f.read().strip()
-                if path:
-                    output_file = path
+            with open(path) as f:
+                p = f.read().strip()
+                return p or None
         except OSError:
-            pass
+            return None
+
+    def _known_output_paths() -> set[str]:
+        """All paths yt-dlp reported (early pre-download + final after_move),
+        used to clean up partial files on cancel/failure."""
+        paths: set[str] = set()
+        early = _read_path_from_temp(_early_tmp)
+        if early:
+            paths.add(early)
+        final = _read_path_from_temp(_filename_tmp)
+        if final:
+            paths.add(final)
+        return paths
 
     def _cleanup_temp() -> None:
-        """Remove the temp file used for --print-to-file."""
-        try:
-            os.unlink(_filename_tmp)
-        except OSError:
-            pass
+        """Remove the temp files used for --print-to-file."""
+        for p in (_filename_tmp, _early_tmp):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
     try:
         task.status = "downloading"
@@ -251,7 +297,10 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            preexec_fn=os.setsid,
+            # start_new_session is the thread-safe equivalent of
+            # preexec_fn=os.setsid and lets us killpg() the whole child
+            # tree on cancel (preexec_fn is unsafe inside the thread pool).
+            start_new_session=True,
         )
 
         for line in task._process.stderr:  # type: ignore[union-attr]
@@ -266,9 +315,11 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
 
         if task._cancelled:
             task.status = "cancelled"
-            _read_filename_from_temp()
-            if output_file is not None:
-                _cleanup_file(output_file)
+            # Clean up any partial file using both the pre-download path
+            # (available even when yt-dlp was killed mid-download) and the
+            # final after_move path.
+            for p in _known_output_paths():
+                _cleanup_file(p)
             _cleanup_temp()
             on_update(task)
             return
@@ -276,9 +327,14 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
         exit_code = task._process.wait()
 
         # Read the actual file path that yt-dlp wrote via --print-to-file
-        _read_filename_from_temp()
+        output_file = _read_path_from_temp(_filename_tmp)
 
-        if exit_code == 0 and output_file is not None and os.path.isfile(output_file) and os.path.getsize(output_file) > 0:
+        if (
+            exit_code == 0
+            and output_file is not None
+            and os.path.isfile(output_file)
+            and os.path.getsize(output_file) > 0
+        ):
             size_bytes = os.path.getsize(output_file)
             task.filename = os.path.basename(output_file)
             task.filepath = output_file
@@ -289,8 +345,8 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
         else:
             task.status = "failed"
             task.error = f"yt-dlp exited with code {exit_code}"
-            if output_file is not None:
-                _cleanup_file(output_file)
+            for p in _known_output_paths():
+                _cleanup_file(p)
             on_update(task)
 
     except FileNotFoundError:
@@ -298,14 +354,13 @@ def download_segment(task: DownloadTask, output_dir: str, on_update: Callable) -
         task.error = "yt-dlp not found. Install with: uv add yt-dlp"
         on_update(task)
 
-    except Exception as e:
-        import traceback
+    except Exception as e:  # noqa: BLE001 - any failure must mark the task
+        # failed instead of crashing the downloader thread.
         traceback.print_exc()
         task.status = "failed"
         task.error = str(e)
-        _read_filename_from_temp()
-        if output_file is not None:
-            _cleanup_file(output_file)
+        for p in _known_output_paths():
+            _cleanup_file(p)
         on_update(task)
     finally:
         _cleanup_temp()

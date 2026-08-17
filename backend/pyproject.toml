@@ -1,0 +1,41 @@
+[tool.basedpyright]
+# basedpyright defaults to strict mode; this project targets the pyright
+# "standard" level (what the original `# pyright: ignore[...]` comments
+# were written against). Third-party libs (fastapi/yt-dlp) ship no type
+# info, so the strict reportUnknown* rules would be pure noise here.
+typeCheckingMode = "standard"
+# basedpyright auto-discovers ./.venv (created by setup.sh), so imports
+# resolve without an explicit pythonPath setting.
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+# Default rule set + a few extra lints that catch real bugs/style issues.
+# BLE001 / DTZ005 are selectively disabled inline (see comments in code).
+lint.select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "DTZ", # flake8-datetimez
+    "ISC", # flake8-implicit-str-concat
+    "PL",  # pylint (only what's flagged, decided case by case)
+]
+
+lint.ignore = [
+    "SIM105",  # try/except/pass is readable; suppress() adds an import for nothing
+    "E501",    # the formatter enforces line length; long docstrings are fine
+    "PLR2004", # magic-number comparison noise (2, 3, 1024 are self-evident here)
+    "PLR0912", # download_segment is intentionally a single CLI orchestration function
+    "PLR0915",
+    "PLW2901", # `line = line.strip()` in a loop is idiomatic
+    "PLC0415", # lazy `import yt_dlp` inside health() is intentional (server must
+               # start even when yt-dlp is not installed yet)
+]
+
+[tool.ruff.format]
+quote-style = "double"

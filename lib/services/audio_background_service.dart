@@ -23,4 +23,16 @@ class AudioBackgroundService {
       // Ignore
     }
   }
+
+  /// Tell the native side whether audio is actually playing. The wake lock
+  /// is only held while [playing] is true — keeping it held while the
+  /// screen-off mode is merely *enabled* (but nothing is playing) would
+  /// drain the battery for nothing.
+  static Future<void> setPlaying(bool playing) async {
+    try {
+      await _channel.invokeMethod('setPlaying', {'playing': playing});
+    } catch (e) {
+      // Ignore — service may not be running (screen-off mode disabled)
+    }
+  }
 }

@@ -21,7 +21,9 @@ class SettingsScreen extends StatelessWidget {
       ),
       body: Consumer2<SettingsProvider, VideoProvider>(
         builder: (context, settings, video, _) {
-          final isScanning = video.scanState == ScanState.scanning;
+          // isScanning is independent of scanState, so a refresh triggered
+          // while videos already exist still shows in-progress feedback.
+          final isScanning = video.isScanning;
 
           return ListView(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -208,9 +210,66 @@ class SettingsScreen extends StatelessWidget {
     video.removeByFolder(uri);
   }
 
+  /// Refresh the video index and give the user clear feedback on the result
+  /// (new videos found / unchanged / failed), since a silent refresh that
+  /// does nothing visible reads as "broken".
   Future<void> _refreshScan(BuildContext context) async {
     final settings = context.read<SettingsProvider>();
-    await context.read<VideoProvider>().scan(settings.folderUris);
+    final video = context.read<VideoProvider>();
+    final before = video.totalCount;
+
+    await video.scan(settings.folderUris);
+
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+
+    // Another scan is still running (the concurrent-scan guard made this
+    // await return immediately) — don't report a premature result.
+    if (video.isScanning) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('正在扫描中，请稍候...'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    final error = video.scanError;
+    if (error != null) {
+      // Partial permission loss — the persistent red banner also shows.
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text('刷新完成，但部分文件夹权限已失效，请重新添加'),
+          backgroundColor: Colors.orange.shade800,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } else if (video.scanState == ScanState.error) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('刷新失败，请检查文件夹权限后重试'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+    } else {
+      final after = video.totalCount;
+      final delta = after - before;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            delta > 0
+                ? '✅ 刷新完成：共 $after 个视频，发现 $delta 个新视频'
+                : delta < 0
+                    ? '✅ 刷新完成：共 $after 个视频（较上次减少 ${-delta} 个）'
+                    : '✅ 刷新完成：共 $after 个视频，无变化',
+          ),
+          backgroundColor: Colors.green.shade800,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 }
 

@@ -59,10 +59,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await controller.play();
       await controller.setLooping(true);
 
-      controller.addListener(() {
-        if (mounted) setState(() {});
-      });
-
       setState(() => _initialized = true);
     } catch (e) {
       setState(() => _error = '播放失败: $e');
@@ -95,27 +91,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
               )
             : !_initialized
                 ? const CircularProgressIndicator(color: Colors.white)
-                : GestureDetector(
-                    onTap: () {
-                      if (_controller!.value.isPlaying) {
-                        _controller!.pause();
-                      } else {
-                        _controller!.play();
-                      }
-                    },
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        Center(
-                          child: AspectRatio(
-                            aspectRatio: _controller!.value.aspectRatio,
-                            child: VideoPlayer(_controller!),
+                // Rebuild only the parts that depend on playback state
+                // (play/pause icon) instead of the whole screen on every
+                // position tick.
+                : ValueListenableBuilder<VideoPlayerValue>(
+                    valueListenable: _controller!,
+                    builder: (context, value, _) => GestureDetector(
+                      onTap: () {
+                        if (value.isPlaying) {
+                          _controller!.pause();
+                        } else {
+                          _controller!.play();
+                        }
+                      },
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Center(
+                            child: AspectRatio(
+                              aspectRatio: value.aspectRatio,
+                              child: VideoPlayer(_controller!),
+                            ),
                           ),
-                        ),
-                        if (!_controller!.value.isPlaying)
-                          const Icon(Icons.play_circle_fill,
-                              size: 64, color: Colors.white54),
-                      ],
+                          if (!value.isPlaying)
+                            const Icon(Icons.play_circle_fill,
+                                size: 64, color: Colors.white54),
+                        ],
+                      ),
                     ),
                   ),
       ),

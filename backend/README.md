@@ -10,10 +10,25 @@ backend/
 ├── downloader.py       # yt-dlp 子进程调用 + 进度解析
 ├── setup.sh            # 一键初始化脚本 (Termux 首次部署用)
 ├── start_server.sh     # 服务控制脚本 (start/stop/restart/status)
-├── requirements.txt    # 依赖清单 (含 --find-links 本地 wheel)
+├── requirements.txt    # 运行依赖清单 (含 --find-links 本地 wheel)
+├── requirements-dev.txt # 本地开发/类型检查依赖 (主机构建，含工具)
+├── pyproject.toml      # ruff + basedpyright 配置
 ├── .python-version     # Python 版本锁定 (3.13)
 ├── wheels/             # Android ARM64 预编译 wheel
  └── pydantic_core-2.46.4-cp313-cp313-android_24_arm64_v8a.whl
+```
+
+## 本地开发 / 代码质量检查
+
+手机 Termux 用 `setup.sh` 部署运行依赖；开发机上的类型检查需要额外安装（
+`requirements.txt` 含 Android wheel，不能直接在 x86_64 主机安装）：
+
+```bash
+uv venv --python python3.13
+uv pip install -r requirements-dev.txt
+
+.venv/bin/ruff check .          # lint + 格式检查
+.venv/bin/basedpyright .        # 类型检查 (basedpyright 自动使用 ./.venv)
 ```
 
 ## API 端点

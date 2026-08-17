@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:video_player/video_player.dart';
 
+import '../services/audio_background_service.dart';
+
 /// Manages the active VideoPlayerController pool.
 ///
 /// Maintains up to 3 controllers (prev / current / next) to avoid
@@ -37,6 +39,22 @@ class PlayerProvider extends ChangeNotifier {
   Future<void> loadCurrent(String uri, {double speed = 1.0}) async {
     final oldController = _currentController;
     _isFinished = false;
+
+    // If a preload for this URI is still in flight, wait for it and adopt
+    // the result instead of racing it with a fresh controller (which would
+    // leak the preloaded one and double-initialize the same source).
+    final inFlight = _preloadInFlight[uri];
+    if (inFlight != null) {
+      try {
+        final preloaded = await inFlight.timeout(const Duration(seconds: 10));
+        if (preloaded != null) {
+          _nextController = preloaded;
+          _preloadedUri = uri;
+        }
+      } catch (_) {
+        // Preload timed out or failed — fall through to _getOrCreate.
+      }
+    }
 
     // Only use the preloaded controller if it has actually finished initializing.
     // _preloadedUri is now set only after preloadNext's initialize() succeeds,
@@ -108,18 +126,42 @@ class PlayerProvider extends ChangeNotifier {
   /// [loadCurrent] picks up a controller that is still initializing.
   Future<VideoPlayerController?> preloadNext(String uri,
       {double speed = 1.0}) async {
-    if (_preloadedUri == uri) return _nextController; // already ready
-    if (_controllerCache.containsKey(uri)) {
-      final cached = _controllerCache[uri];
-      // Only promote to _nextController if the cached controller is fully
-      // initialized. Otherwise we'd advertise an uninitialized controller
-      // as ready, and loadCurrent's isInitialized guard would reject it.
-      if (cached!.value.isInitialized) {
+    if (_preloadedUri == uri && _nextController?.value.isInitialized == true) {
+      return _nextController; // already ready
+    }
+    // A preload for this URI is already running — share its future instead
+    // of creating a second controller (which would leak the first and
+    // double-initialize the same native resource).
+    final inFlight = _preloadInFlight[uri];
+    if (inFlight != null) return inFlight;
+
+    final future = _doPreload(uri, speed: speed);
+    _preloadInFlight[uri] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_preloadInFlight[uri], future)) {
+        _preloadInFlight.remove(uri);
+      }
+    }
+  }
+
+  /// Actual preload work. Never called twice concurrently for the same URI
+  /// (guarded by [_preloadInFlight]).
+  Future<VideoPlayerController?> _doPreload(String uri,
+      {double speed = 1.0}) async {
+    final cached = _controllerCache[uri];
+    if (cached != null) {
+      // Fully initialized — just promote it.
+      if (cached.value.isInitialized) {
         _nextController = cached;
         _preloadedUri = uri;
         return _nextController;
       }
-      // Still initializing — fall through and wait for it, or create fresh.
+      // Cached but initializing (e.g. created by loadCurrent) — wait for
+      // it and adopt it. Do NOT call initialize() again here: video_player
+      // creates a fresh platform player per initialize() call.
+      return _finishPreload(cached, uri, speed);
     }
 
     final controller = VideoPlayerController.contentUri(
@@ -129,25 +171,41 @@ class PlayerProvider extends ChangeNotifier {
     _controllerCache[uri] = controller;
     // Set _nextController BEFORE _trimCache so the in-progress controller
     // is considered "active" and won't be disposed while initializing.
-    // loadCurrent's isInitialized guard will still reject it until ready.
     _nextController = controller;
     _trimCache();
+    return _finishPreload(controller, uri, speed);
+  }
 
+  Future<VideoPlayerController?> _finishPreload(
+      VideoPlayerController controller, String uri, double speed) async {
     try {
-      await controller.initialize();
+      // Timeout guard: if this controller gets disposed while initializing
+      // (e.g. by stopAndClear), video_player's initialize() future may never
+      // complete. Don't let the in-flight entry block loadCurrent forever.
+      await controller.initialize().timeout(const Duration(seconds: 10));
+      // If loadCurrent claimed this controller while we were initializing,
+      // skip the preload-side setup — the current path owns its state now
+      // and pausing it here would stop playback.
+      if (_currentController == controller) return controller;
       await controller.setPlaybackSpeed(speed);
       await controller.setLooping(true);
       await controller.pause(); // paused, ready to play on swap
-
-      // Mark as ready for loadCurrent consumption.
-      _preloadedUri = uri;
+      if (_currentController != controller) {
+        // Mark as ready for loadCurrent consumption.
+        _nextController = controller;
+        _preloadedUri = uri;
+      }
       return controller;
     } catch (e) {
       debugPrint('Preload failed for $uri: $e');
-      _controllerCache.remove(uri);
-      _nextController = null;
-      _preloadedUri = null;
-      controller.dispose();
+      if (_currentController != controller) {
+        if (identical(_controllerCache[uri], controller)) {
+          _controllerCache.remove(uri);
+        }
+        if (_nextController == controller) _nextController = null;
+        if (_preloadedUri == uri) _preloadedUri = null;
+        controller.dispose();
+      }
       return null;
     }
   }
@@ -172,6 +230,11 @@ class PlayerProvider extends ChangeNotifier {
     }
 
     if (wasPlaying != _isPlaying || _isFinished) {
+      // Keep the native wake lock in sync with actual playback: it must
+      // only be held while audio is really playing (screen-off mode).
+      if (wasPlaying != _isPlaying) {
+        AudioBackgroundService.setPlaying(_isPlaying);
+      }
       notifyListeners();
     }
   }
@@ -212,6 +275,7 @@ class PlayerProvider extends ChangeNotifier {
   Future<void> stopAndClear() async {
     _currentController?.removeListener(_onListener);
     await _currentController?.pause();
+    AudioBackgroundService.setPlaying(false);
 
     for (final c in _controllerCache.values) {
       await c.pause();
@@ -222,28 +286,38 @@ class PlayerProvider extends ChangeNotifier {
     _prevController = null;
     _nextController = null;
     _preloadedUri = null;
+    // In-flight preloads are left running; their continuations see
+    // _currentController == null and safely skip promotion/cleanup.
+    _preloadInFlight.clear();
     _isPlaying = false;
     _isInitialized = false;
     _isFinished = false;
     notifyListeners();
   }
 
-  // ---- internal pool ----
+  /// Internal handle for cancellation
+  /// Tracks preloads that are still initializing, so concurrent
+  /// [preloadNext] / [loadCurrent] calls for the same URI share one
+  /// controller instead of leaking duplicates.
+  final Map<String, Future<VideoPlayerController?>> _preloadInFlight = {};
 
   final Map<String, VideoPlayerController> _controllerCache = {};
 
   VideoPlayerController _getOrCreate(String uri) {
-    if (_controllerCache.containsKey(uri)) {
-      final cached = _controllerCache[uri]!;
-      // Only reuse if fully initialized.  Otherwise (e.g. a preload is
-      // still in progress) calling initialize() on it again would cause
-      // "VideoPlayerController used after being disposed".
+    final cached = _controllerCache[uri];
+    if (cached != null) {
+      // Only reuse if fully initialized.  Otherwise (e.g. a previous load
+      // errored) create a fresh one and dispose the stale entry so its
+      // native resources are freed.
       if (cached.value.isInitialized) {
         return cached;
       }
-      // Cached but uninitialized — remove and create fresh to avoid
-      // double-initialize collision with the in-progress preload.
       _controllerCache.remove(uri);
+      if (!identical(cached, _currentController) &&
+          !identical(cached, _nextController) &&
+          !identical(cached, _prevController)) {
+        cached.dispose();
+      }
     }
     final c = VideoPlayerController.contentUri(
       Uri.parse(uri),
@@ -285,6 +359,7 @@ class PlayerProvider extends ChangeNotifier {
   @override
   void dispose() {
     _currentController?.removeListener(_onListener);
+    AudioBackgroundService.setPlaying(false);
     for (final c in _controllerCache.values) {
       c.dispose();
     }

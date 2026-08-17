@@ -27,7 +27,12 @@ class MainActivity : FlutterFragmentActivity() {
                 pending?.success(null)
                 return@registerForActivityResult
             }
-            val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            // Persist BOTH read and write: deleting files via
+            // DocumentsContract.deleteDocument requires write access, so a
+            // read-only persisted grant would make permanent delete fail
+            // after the app is restarted.
             contentResolver.takePersistableUriPermission(uri, takeFlags)
 
             Thread {
@@ -90,6 +95,13 @@ class MainActivity : FlutterFragmentActivity() {
                 }
                 "stopBackgroundService" -> {
                     stopBackgroundService()
+                    result.success(true)
+                }
+                "setPlaying" -> {
+                    val playing = call.argument<Boolean>("playing") ?: false
+                    // Service may not be running yet — the call is a no-op
+                    // then (wakeLock == null).
+                    BackgroundAudioService.setPlaying(playing)
                     result.success(true)
                 }
                 else -> result.notImplemented()

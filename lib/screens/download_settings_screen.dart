@@ -144,7 +144,13 @@ class _DownloadSettingsScreenState extends State<DownloadSettingsScreen> {
                 helperStyle: TextStyle(color: Colors.white30),
               ),
               onSubmitted: (v) {
-                sp.setServerUrl(v);
+                final url = v.trim();
+                if (url.isEmpty) return;
+                sp.setServerUrl(url);
+                // Apply immediately — the running ApiService keeps its
+                // startup URL otherwise, so this setting was a no-op until
+                // the next app launch.
+                dp.updateServerUrl(url);
               },
             ),
             const SizedBox(height: 12),

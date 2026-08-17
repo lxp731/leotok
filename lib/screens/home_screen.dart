@@ -15,6 +15,7 @@ import '../widgets/video_player_widget.dart';
 import '../widgets/long_press_menu.dart';
 import '../widgets/empty_guide.dart';
 import '../widgets/page_tabs.dart';
+import '../services/audio_background_service.dart';
 import '../app.dart';
 
 /// The main playback screen with TikTok-style vertical swipe gestures.
@@ -93,6 +94,14 @@ class _HomeScreenState extends State<HomeScreen>
     } else {
       _cancelScreenOffTimer();
       _playerProvider?.disableAudioKeepAlive();
+    }
+
+    // Keep the native wake lock in sync: it is only held while audio is
+    // actually playing, even if screen-off listening was just enabled.
+    if (_playerProvider?.isPlaying == true) {
+      AudioBackgroundService.setPlaying(true);
+    } else {
+      AudioBackgroundService.setPlaying(false);
     }
   }
 
@@ -196,58 +205,67 @@ class _HomeScreenState extends State<HomeScreen>
     if (video == null || _isLoadingVideo) return;
     _isLoadingVideo = true;
     final settings = context.read<SettingsProvider>();
-    try {
-      await player.loadCurrent(video.uri, speed: settings.playbackSpeed);
-      final shouldLoop = !settings.autoPlayEnabled && !settings.screenOffListeningEnabled;
-      await player.current?.setLooping(shouldLoop);
 
-      // Preload next video for instant swipe (fire-and-forget — should not
-      // block the current video from being displayed).
-      _preloadNextVideo();
-      _loadRetryCount = 0; // reset on success
-      _permanentLoadFailure = false;
-      _isLoadingVideo = false;
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('无法播放: ${video.name}'),
-            backgroundColor: Colors.red[800],
-          ),
-        );
-      }
-      // Circuit breaker: if too many consecutive load failures, stop trying.
-      _loadRetryCount++;
-      if (_loadRetryCount > _maxLoadRetries) {
-        _loadRetryCount = 0;
-        _permanentLoadFailure = true;
+    // Retry loop: on load failure, fall back to previous / random video and
+    // retry. Bounded by _maxLoadRetries so a library full of broken files
+    // can't spin forever. _isLoadingVideo is always reset on exit, so a
+    // single failed video can never deadlock the player.
+    VideoItem? current = video;
+    while (current != null) {
+      try {
+        await player.loadCurrent(current.uri, speed: settings.playbackSpeed);
+        final shouldLoop =
+            !settings.autoPlayEnabled && !settings.screenOffListeningEnabled;
+        await player.current?.setLooping(shouldLoop);
+
+        // Preload next video for instant swipe (fire-and-forget — should not
+        // block the current video from being displayed).
+        _preloadNextVideo();
+        _loadRetryCount = 0; // reset on success
+        _permanentLoadFailure = false;
         _isLoadingVideo = false;
-        await player.stopAndClear();
         return;
-      }
-      // Recover by going back to previous video.
-      // If the dead URI came from forwardHistory, playNext() already
-      // removed it, so the next swipe won't hit it again.
-      final videoProvider = context.read<VideoProvider>();
-      if (videoProvider.hasHistory) {
-        videoProvider.playPrevious();
-        if (videoProvider.current != null) {
-          _loadCurrentVideo(player, videoProvider.current);
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('无法播放: ${current.name}'),
+              backgroundColor: Colors.red[800],
+            ),
+          );
         }
-      } else if (videoProvider.totalCount > 1) {
-        // No history (e.g. first video failed) — pick a random different one.
-        videoProvider.playRandom();
-        if (videoProvider.current != null) {
-          _loadCurrentVideo(player, videoProvider.current);
+        // Circuit breaker: if too many consecutive load failures, stop trying.
+        _loadRetryCount++;
+        if (_loadRetryCount > _maxLoadRetries) {
+          _loadRetryCount = 0;
+          _permanentLoadFailure = true;
+          _isLoadingVideo = false;
+          await player.stopAndClear();
+          return;
         }
-      } else {
-        // Only one video and it's broken — stop the player so the UI
-        // doesn't show a permanent spinner.
-        _permanentLoadFailure = true;
-        _isLoadingVideo = false;
-        await player.stopAndClear();
+        // Recover by going back to previous video.
+        // If the dead URI came from forwardHistory, playNext() already
+        // removed it, so the next swipe won't hit it again.
+        final videoProvider = context.read<VideoProvider>();
+        if (videoProvider.hasHistory) {
+          videoProvider.playPrevious();
+          current = videoProvider.current;
+        } else if (videoProvider.totalCount > 1) {
+          // No history (e.g. first video failed) — pick a random different one.
+          videoProvider.playRandom();
+          current = videoProvider.current;
+        } else {
+          // Only one video and it's broken — stop the player so the UI
+          // doesn't show a permanent spinner.
+          _permanentLoadFailure = true;
+          _isLoadingVideo = false;
+          await player.stopAndClear();
+          return;
+        }
       }
     }
+    // Library became empty mid-retry.
+    _isLoadingVideo = false;
   }
 
   void _preloadNextVideo() {
@@ -379,17 +397,51 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ---- long press ----
 
-  void _onLongPressStart(LongPressStartDetails _) {
+  /// Left/right 20% zones: holding plays at 2x speed (screen split 2:6:2).
+  bool _isSpeedBoosting = false;
+  double _speedBeforeBoost = 1.0;
+
+  void _onLongPressStart(LongPressStartDetails d) {
+    // The screen is split into three vertical zones (left 20% / middle 60% /
+    // right 20%). Holding a side zone plays at 2x while held; the middle
+    // zone keeps the original long-press menu behaviour.
+    final width = MediaQuery.of(context).size.width;
+    final dx = d.globalPosition.dx;
+    if (dx < width * 0.2 || dx > width * 0.8) {
+      _startSpeedBoost();
+      return;
+    }
     _longPressPrimed = true;
     _showLongPressMenu();
   }
 
   void _onLongPressEnd(LongPressEndDetails _) {
+    _stopSpeedBoost();
     setState(() => _longPressPrimed = false);
   }
 
   void _onLongPressCancel() {
+    _stopSpeedBoost();
     setState(() => _longPressPrimed = false);
+  }
+
+  /// Hold-to-boost: remember the base speed, then play at 2x.
+  void _startSpeedBoost() {
+    final player = _playerProvider;
+    if (player == null || player.current == null || _isSpeedBoosting) return;
+    _speedBeforeBoost = _settingsProvider?.playbackSpeed ?? 1.0;
+    _isSpeedBoosting = true;
+    HapticFeedback.lightImpact();
+    player.setSpeed(2.0);
+    if (mounted) setState(() {});
+  }
+
+  /// Restore the base speed when the finger lifts or the gesture cancels.
+  void _stopSpeedBoost() {
+    if (!_isSpeedBoosting) return;
+    _isSpeedBoosting = false;
+    _playerProvider?.setSpeed(_speedBeforeBoost);
+    if (mounted) setState(() {});
   }
 
   void _showLongPressMenu() async {
@@ -638,6 +690,33 @@ class _HomeScreenState extends State<HomeScreen>
                   _buildLoading(video),
                 // Page tabs overlaid on video (hidden in landscape)
                 if (!_isLandscape) _buildPageTabs(),
+                // 2x speed-boost badge (visible while holding a side zone)
+                if (_isSpeedBoosting)
+                  Positioned(
+                    top: MediaQuery.of(context).padding.top + 60,
+                    left: 0,
+                    right: 0,
+                    child: IgnorePointer(
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: const Text(
+                            '⏩ 2x 加速',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
             ),
